@@ -23,6 +23,16 @@ Built by reverse-engineering the protocol used by Brother's iPrint&Scan Mac app.
 - [Pillow](https://python-pillow.org/) (for image processing and PDF generation)
 - A Brother ADS-series scanner on the local network (tested with ADS-1350W)
 
+### Install dependencies
+
+```bash
+# Via pip
+pip install Pillow
+
+# Or on Debian/Ubuntu/Raspberry Pi OS
+sudo apt install python3-pil
+```
+
 ## Usage
 
 ```bash
