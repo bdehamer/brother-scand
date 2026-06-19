@@ -117,6 +117,51 @@ This daemon uses the Brother proprietary scan protocol (not eSCL/AirScan):
 The older registration OID (`1.3.6.1.4.1.2435.2.3.9.2.11.1.1.0`) used by most
 open-source Brother scan tools does **not** work on newer models like the ADS-1350W.
 
+### Protocol Flow
+
+```mermaid
+sequenceDiagram
+    participant D as Daemon (Pi)
+    participant S as Scanner
+
+    Note over D,S: Registration (UDP 161 — SNMP)
+    loop Every 330 seconds
+        D->>S: SNMP SET (OID ...5.58.2.0)<br/>USER="rosie";HOST=ip:54950;DURATION=360
+        S-->>D: SNMP Response (OK)
+    end
+
+    Note over D,S: Button Press (TCP 54950)
+    S->>D: TCP connect to port 54950
+    S->>D: JSON {button_number, model_name, serial_number}
+    D-->>S: ACK {button_number: null, ...}
+    S--xD: TCP close
+
+    Note over D,S: Scan Data (TCP 54921)
+    D->>S: TCP connect to port 54921
+    S-->>D: +OK 200
+    D->>S: ESC Q (handshake)
+    S-->>D: Device info (76 bytes)
+    D->>S: ESC Q DI (query capabilities)
+    S-->>D: Capabilities (998 bytes)
+    D->>S: ESC S SP (scan settings)<br/>RESO, CLR, DPLX, COMP=JPEG...
+    S-->>D: Settings confirmation
+    D->>S: ESC G CP (get current page)
+    S-->>D: Page header + ICC profile
+    D->>S: ESC X SC (start scan)<br/>RESO, AREA, MODE
+
+    loop For each page
+        S-->>D: JPEG data stream<br/>(with 14-byte framing headers every ~512KB)
+    end
+    S-->>D: End-of-scan marker (2 bytes)
+    D--xS: TCP close
+
+    Note over D: Post-processing
+    D->>D: Strip framing headers
+    D->>D: Auto-crop (gray_only or tight)
+    D->>D: Detect & skip blank pages
+    D->>D: Assemble PDF (if configured)
+```
+
 ## Tested On
 
 - Brother ADS-1350W
