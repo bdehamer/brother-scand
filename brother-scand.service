@@ -8,9 +8,9 @@ Type=simple
 User=brother-scand
 Group=brother-scand
 ExecStart=/opt/brother-scand/brother_scan.py --config /etc/brother-scand/profiles.conf
-ExecStop=/bin/kill -TERM $MAINPID
 Restart=on-failure
 RestartSec=10
+TimeoutStopSec=10
 
 # Output directory (override in profiles.conf or create this)
 WorkingDirectory=/var/lib/brother-scand
