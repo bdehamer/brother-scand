@@ -162,6 +162,130 @@ sequenceDiagram
     D->>D: Assemble PDF
 ```
 
+## Installing as a System Service
+
+These instructions install `brother-scand` as a proper systemd service with
+least-privilege security hardening.
+
+### 1. Create a dedicated service user
+
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin brother-scand
+```
+
+### 2. Install the script
+
+The conventional location for locally-installed daemons on Linux is `/opt`:
+
+```bash
+sudo mkdir -p /opt/brother-scand
+sudo cp brother_scan.py /opt/brother-scand/
+sudo chmod 755 /opt/brother-scand/brother_scan.py
+sudo chown root:root /opt/brother-scand/brother_scan.py
+```
+
+### 3. Install the config file
+
+System service configs belong in `/etc`:
+
+```bash
+sudo mkdir -p /etc/brother-scand
+sudo cp profiles.conf /etc/brother-scand/
+sudo chmod 644 /etc/brother-scand/profiles.conf
+sudo chown root:root /etc/brother-scand/profiles.conf
+```
+
+Edit `/etc/brother-scand/profiles.conf` to set your scanner IP, hostname, and
+output directory. Note: since the service runs as a dedicated user, use an
+absolute path for `output_dir` (not `~`):
+
+```ini
+[scanner]
+ip = 192.168.4.158
+hostname = scanner
+output_dir = /var/lib/brother-scand/scans
+```
+
+### 4. Create the output directory
+
+```bash
+sudo mkdir -p /var/lib/brother-scand/scans
+sudo chown brother-scand:brother-scand /var/lib/brother-scand
+sudo chown brother-scand:brother-scand /var/lib/brother-scand/scans
+```
+
+### 5. Install the systemd unit
+
+```bash
+sudo cp brother-scand.service /etc/systemd/system/
+sudo systemctl daemon-reload
+```
+
+### 6. Install Python dependencies
+
+```bash
+sudo apt install python3-pil
+```
+
+### 7. Enable and start the service
+
+```bash
+sudo systemctl enable brother-scand   # start on boot
+sudo systemctl start brother-scand    # start now
+```
+
+### Managing the service
+
+```bash
+sudo systemctl status brother-scand   # check status
+sudo journalctl -u brother-scand -f   # follow logs
+sudo systemctl restart brother-scand  # restart after config changes
+sudo systemctl stop brother-scand     # stop (unregisters cleanly)
+```
+
+### File layout summary
+
+```
+/opt/brother-scand/
+└── brother_scan.py            # The daemon script (root-owned, 755)
+
+/etc/brother-scand/
+└── profiles.conf              # Configuration (root-owned, 644)
+
+/var/lib/brother-scand/
+└── scans/                     # Scan output (owned by brother-scand user)
+
+/etc/systemd/system/
+└── brother-scand.service       # systemd unit file
+```
+
+### Security notes
+
+The systemd unit includes several hardening options:
+
+- **Dedicated user** — runs as `brother-scand`, not root
+- **ProtectSystem=strict** — filesystem is read-only except explicitly allowed paths
+- **ProtectHome=true** — cannot access `/home`, `/root`, or `/run/user`
+- **NoNewPrivileges** — cannot escalate privileges
+- **PrivateTmp** — isolated `/tmp`
+- **ReadWritePaths** — only `/var/lib/brother-scand` is writable
+
+The daemon only needs network access (UDP 161 for SNMP, TCP 54950 inbound,
+TCP 54921 outbound) and write access to the output directory.
+
+### Uninstalling
+
+```bash
+sudo systemctl stop brother-scand
+sudo systemctl disable brother-scand
+sudo rm /etc/systemd/system/brother-scand.service
+sudo systemctl daemon-reload
+sudo rm -rf /opt/brother-scand /etc/brother-scand
+sudo userdel brother-scand
+# Optionally remove scan output:
+# sudo rm -rf /var/lib/brother-scand
+```
+
 ## Tested On
 
 - Brother ADS-1350W
