@@ -15,6 +15,7 @@ import configparser
 import json
 import logging
 import os
+import signal
 import socket
 import time
 import threading
@@ -26,6 +27,9 @@ log = logging.getLogger("brother-scan")
 # Brother-specific SNMP OIDs
 OID_PRINTER_STATUS = (1, 3, 6, 1, 4, 1, 2435, 2, 3, 9, 4, 2, 1, 5, 5, 6, 0)
 OID_REGISTER_KEY_V2 = (1, 3, 6, 1, 4, 1, 2435, 2, 4, 3, 2435, 5, 58, 2, 0)
+# Candidate unregister OIDs (will try in order)
+OID_UNREGISTER_KEY_V2 = (1, 3, 6, 1, 4, 1, 2435, 2, 4, 3, 2435, 5, 58, 3, 0)
+OID_UNREGISTER_KEY_V1 = (1, 3, 6, 1, 4, 1, 2435, 2, 3, 9, 2, 11, 1, 2, 0)
 
 SNMP_PORT = 161
 BUTTON_PORT = 54950       # TCP — scanner connects to us here
@@ -315,6 +319,62 @@ class BrotherScanner:
             log.error("Registration error: status=%d index=%d", es, ei)
             return False
         log.info("Registered as '%s'", self.hostname)
+        return True
+
+    def unregister(self) -> bool:
+        """Attempt to unregister from the scanner on shutdown.
+
+        Tries multiple strategies:
+        1. SET DURATION=0 on the register OID (expire immediately)
+        2. SET to the v2 unregister OID (one past the register OID)
+        3. SET to the v1 unregister OID (legacy, may work on some models)
+
+        Returns True if any strategy got a non-error response.
+        """
+        log.info("Unregistering from scanner...")
+
+        # Strategy 1: re-register with DURATION=0 to expire immediately
+        reg_expire = (f'USER="{self.hostname}";'
+                      f'HOST={self.local_ip}:{BUTTON_PORT};'
+                      f'DURATION=0')
+        if self._try_snmp_set(OID_REGISTER_KEY_V2, reg_expire,
+                              "DURATION=0 on register OID"):
+            return True
+
+        # Strategy 2: try the v2 unregister OID (next OID after register)
+        unreg = (f'USER="{self.hostname}";'
+                 f'HOST={self.local_ip}:{BUTTON_PORT}')
+        if self._try_snmp_set(OID_UNREGISTER_KEY_V2, unreg,
+                              "v2 unregister OID"):
+            return True
+
+        # Strategy 3: try the legacy v1 unregister OID
+        unreg_v1 = (f'TYPE=BR;BUTTON=SCAN;USER="{self.hostname}";'
+                    f'HOST={self.local_ip}:{BUTTON_PORT}')
+        if self._try_snmp_set(OID_UNREGISTER_KEY_V1, unreg_v1,
+                              "v1 unregister OID"):
+            return True
+
+        log.warning("All unregister strategies failed — "
+                    "registration will expire in %ds",
+                    REGISTER_DURATION_SEC)
+        return False
+
+    def _try_snmp_set(self, oid: tuple, value: str, desc: str) -> bool:
+        """Send an SNMP SET and return True if no error response."""
+        pkt = build_snmp_set("internal", self._next_id(), oid, [value])
+        self.snmp_sock.sendto(pkt, (self.scanner_ip, SNMP_PORT))
+        try:
+            data, _ = self.snmp_sock.recvfrom(1024)
+        except socket.timeout:
+            log.debug("Unregister via %s: timed out", desc)
+            return False
+        _, es, ei, _ = parse_snmp_response(data)
+        if es != 0 or ei != 0:
+            log.debug("Unregister via %s: error status=%d index=%d",
+                      desc, es, ei)
+            return False
+        log.info("Unregistered via %s", desc)
         return True
 
     # ----- button event listener (TCP 54950) -----
@@ -720,21 +780,38 @@ class BrotherScanner:
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.bind(("0.0.0.0", BUTTON_PORT))
         server.listen(5)
+        server.settimeout(1.0)  # Allow periodic check of stop_event
         log.info("Listening for scan events on TCP %d...", BUTTON_PORT)
 
+        # Set up signal handlers for graceful shutdown
+        def shutdown_handler(signum, frame):
+            sig_name = signal.Signals(signum).name
+            log.info("Received %s, shutting down...", sig_name)
+            stop_event.set()
+
+        signal.signal(signal.SIGINT, shutdown_handler)
+        signal.signal(signal.SIGTERM, shutdown_handler)
+
         try:
-            while True:
-                conn, addr = server.accept()
+            while not stop_event.is_set():
+                try:
+                    conn, addr = server.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break  # Socket closed
                 log.info("Connection from %s:%d", addr[0], addr[1])
                 # Handle in a thread so we can accept the next event
                 t = threading.Thread(target=self._handle_button_event,
                                      args=(conn, addr), daemon=True)
                 t.start()
-        except KeyboardInterrupt:
-            log.info("Shutting down...")
-            stop_event.set()
+        except (KeyboardInterrupt, SystemExit):
+            pass
         finally:
+            stop_event.set()
+            self.unregister()
             server.close()
+            log.info("Shutdown complete.")
 
 
 def main():
